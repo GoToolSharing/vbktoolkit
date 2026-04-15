@@ -445,7 +445,29 @@ func (l *lockedReadSeekerAt) ReadAt(p []byte, off int64) (int, error) {
 	if _, err := l.r.Seek(off, io.SeekStart); err != nil {
 		return 0, err
 	}
-	return io.ReadFull(l.r, p)
+
+	read := 0
+	for read < len(p) {
+		n, err := l.r.Read(p[read:])
+		read += n
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				if read == len(p) {
+					return read, nil
+				}
+				return read, io.EOF
+			}
+			return read, err
+		}
+		if n == 0 {
+			break
+		}
+	}
+
+	if read < len(p) {
+		return read, io.EOF
+	}
+	return read, nil
 }
 
 func normalizeGuestPath(p, cwd string) string {
