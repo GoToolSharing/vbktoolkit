@@ -13,6 +13,9 @@ It is a port of the VBK logic from the Python `dissect.archive.vbk` implementati
 - Decompress LZ4-compressed blocks
 - Support MetaVector and MetaVector2 layouts
 - Parse property dictionaries
+- Discover guest volumes embedded in VBK virtual disks (`.vhdx`)
+- Parse GPT partition layout from embedded virtual disks
+- Read NTFS guest files and directories (read-only)
 
 ## Installation
 
@@ -82,6 +85,35 @@ func main() {
 - `(*DirItem).IterDir() ([]*DirItem, error)`
 - `(*DirItem).Open() (*FibStream, error)`
 - `(*DirItem).Properties() (PropertiesDictionary, error)`
+- `(*VBK).DiscoverGuest() (*Guest, error)`
+- `(*Guest).Volumes() []*GuestVolume`
+- `(*Guest).DefaultIndex() int`
+- `(*GuestVolume).ListDir(path string) ([]GuestEntry, error)`
+- `(*GuestVolume).ReadFile(path string, limit int64) ([]byte, error)`
+
+## Guest Volume Example
+
+```go
+guest, err := backup.DiscoverGuest()
+if err != nil {
+    log.Fatal(err)
+}
+defer guest.Close()
+
+for _, vol := range guest.Volumes() {
+    fmt.Printf("[%d] disk=%s volume=%d name=%q size=%d\n", vol.Index, vol.DiskPath, vol.VolumeIndex, vol.Name, vol.Size)
+}
+
+idx := guest.DefaultIndex()
+vol := guest.Volumes()[idx]
+entries, err := vol.ListDir("/")
+if err != nil {
+    log.Fatal(err)
+}
+for _, e := range entries {
+    fmt.Printf("%s dir=%v size=%d\n", e.Path, e.IsDir, e.Size)
+}
+```
 
 ## Validation
 
@@ -93,6 +125,7 @@ go test ./...
 
 - Current implementation focuses on reliable read/extract workflows.
 - Some advanced VBK features (for example encryption-specific handling) are not implemented yet.
+- Guest filesystem support currently targets NTFS partitions from embedded VHDX disks.
 
 ## Related Project
 
