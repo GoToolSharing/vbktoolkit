@@ -60,16 +60,22 @@ func (v *VBK) DiscoverGuest() (*Guest, error) {
 		}
 		g.closers = append(g.closers, stream)
 
-		virtualReader, sectorSize, err := openVirtualDiskReader(&lockedReadSeekerAt{r: stream})
+		locked := &lockedReadSeekerAt{r: stream}
+		virtualReader, sectorSize, virtualDiskSize, err := openVirtualDiskReader(locked)
 		if err != nil {
-			continue
+			virtualReader = locked
+			sectorSize = inferLogicalSectorSize(disk.Item)
+			virtualDiskSize, _ = disk.Item.Size()
 		}
 
 		parts, err := parseGPTPartitions(virtualReader, sectorSize)
 		if err != nil || len(parts) == 0 {
 			parts, err = parseMBRPartitions(virtualReader, sectorSize)
-			if err != nil {
-				continue
+			if err != nil || len(parts) == 0 {
+				parts = scanNTFSPartitions(virtualReader, sectorSize, virtualDiskSize)
+				if len(parts) == 0 {
+					continue
+				}
 			}
 		}
 
@@ -426,12 +432,85 @@ func mbrPartitionName(t byte) string {
 	}
 }
 
-func openVirtualDiskReader(r io.ReaderAt) (io.ReaderAt, uint32, error) {
+func openVirtualDiskReader(r io.ReaderAt) (io.ReaderAt, uint32, uint64, error) {
 	vf, err := vhdx.NewVHDXFile(r)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
-	return vf, uint32(vf.Metadata.LogicalSectorSize), nil
+	return vf, uint32(vf.Metadata.LogicalSectorSize), uint64(vf.Metadata.VirtualDiskSize), nil
+}
+
+func inferLogicalSectorSize(item *DirItem) uint32 {
+	props, err := item.Properties()
+	if err == nil && props != nil {
+		if raw, ok := props["LogicalSectorSize"]; ok {
+			switch v := raw.(type) {
+			case uint32:
+				if v > 0 {
+					return v
+				}
+			case uint64:
+				if v > 0 {
+					return uint32(v)
+				}
+			case int:
+				if v > 0 {
+					return uint32(v)
+				}
+			}
+		}
+	}
+	return 512
+}
+
+func scanNTFSPartitions(r io.ReaderAt, sectorSize uint32, diskSize uint64) []gptPartition {
+	if sectorSize == 0 {
+		sectorSize = 512
+	}
+	if diskSize == 0 {
+		return nil
+	}
+
+	const scanCap = 2 * 1024 * 1024 * 1024 // 2 GiB
+	limit := diskSize
+	if limit > scanCap {
+		limit = scanCap
+	}
+
+	buf := make([]byte, sectorSize)
+	seen := map[uint64]struct{}{}
+	out := make([]gptPartition, 0, 4)
+
+	for off := uint64(0); off+uint64(sectorSize) <= limit; off += 1024 * 1024 {
+		if _, err := r.ReadAt(buf, int64(off)); err != nil {
+			continue
+		}
+		if !looksLikeNTFSBootSector(buf) {
+			continue
+		}
+		if _, ok := seen[off]; ok {
+			continue
+		}
+		seen[off] = struct{}{}
+		out = append(out, gptPartition{
+			Index: uint32(len(out) + 1),
+			Name:  "Basic data partition",
+			Start: off,
+			Size:  diskSize - off,
+		})
+	}
+
+	return out
+}
+
+func looksLikeNTFSBootSector(buf []byte) bool {
+	if len(buf) < 512 {
+		return false
+	}
+	if buf[510] != 0x55 || buf[511] != 0xAA {
+		return false
+	}
+	return bytes.Equal(buf[3:11], []byte("NTFS    "))
 }
 
 type lockedReadSeekerAt struct {
