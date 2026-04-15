@@ -66,8 +66,11 @@ func (v *VBK) DiscoverGuest() (*Guest, error) {
 		}
 
 		parts, err := parseGPTPartitions(virtualReader, sectorSize)
-		if err != nil {
-			continue
+		if err != nil || len(parts) == 0 {
+			parts, err = parseMBRPartitions(virtualReader, sectorSize)
+			if err != nil {
+				continue
+			}
 		}
 
 		for _, p := range parts {
@@ -368,6 +371,59 @@ func parseGPTPartitions(r io.ReaderAt, sectorSize uint32) ([]gptPartition, error
 	}
 
 	return out, nil
+}
+
+func parseMBRPartitions(r io.ReaderAt, sectorSize uint32) ([]gptPartition, error) {
+	if sectorSize == 0 {
+		sectorSize = 512
+	}
+
+	mbr := make([]byte, 512)
+	if _, err := r.ReadAt(mbr, 0); err != nil {
+		return nil, err
+	}
+	if mbr[510] != 0x55 || mbr[511] != 0xAA {
+		return nil, fmt.Errorf("no MBR signature found")
+	}
+
+	out := make([]gptPartition, 0, 4)
+	for i := 0; i < 4; i++ {
+		off := 0x1BE + i*16
+		ptype := mbr[off+4]
+		startLBA := binary.LittleEndian.Uint32(mbr[off+8 : off+12])
+		sectors := binary.LittleEndian.Uint32(mbr[off+12 : off+16])
+		if ptype == 0 || sectors == 0 {
+			continue
+		}
+		out = append(out, gptPartition{
+			Index: uint32(i + 1),
+			Name:  mbrPartitionName(ptype),
+			Start: uint64(startLBA) * uint64(sectorSize),
+			Size:  uint64(sectors) * uint64(sectorSize),
+		})
+	}
+
+	if len(out) == 0 {
+		return nil, fmt.Errorf("no MBR partitions found")
+	}
+	return out, nil
+}
+
+func mbrPartitionName(t byte) string {
+	switch t {
+	case 0x07:
+		return "Basic data partition"
+	case 0x0B, 0x0C, 0x0E:
+		return "FAT partition"
+	case 0x82:
+		return "Linux swap"
+	case 0x83:
+		return "Linux filesystem"
+	case 0xEF:
+		return "EFI system partition"
+	default:
+		return fmt.Sprintf("MBR partition 0x%02x", t)
+	}
 }
 
 func openVirtualDiskReader(r io.ReaderAt) (io.ReaderAt, uint32, error) {
