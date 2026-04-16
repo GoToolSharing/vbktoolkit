@@ -15,7 +15,7 @@ It is a port of the VBK logic from the Python `dissect.archive.vbk` implementati
 - Parse property dictionaries
 - Discover guest volumes embedded in VBK virtual disks (`.vhd`, `.vhdx`, `.vmdk`)
 - Parse GPT partition layout from embedded virtual disks
-- Read NTFS guest files and directories (read-only)
+- Read NTFS and EXT4 guest files/directories (read-only)
 
 ## Installation
 
@@ -125,7 +125,7 @@ go test ./...
 
 - Current implementation focuses on reliable read/extract workflows.
 - Some advanced VBK features (for example encryption-specific handling) are not implemented yet.
-- Guest filesystem support currently targets NTFS partitions from embedded VHD/VHDX/VMDK disks.
+- Guest filesystem support currently targets NTFS and EXT4 partitions from embedded VHD/VHDX/VMDK disks.
 
 ## Related Project
 
