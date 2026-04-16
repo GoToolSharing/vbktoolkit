@@ -13,7 +13,7 @@ It is a port of the VBK logic from the Python `dissect.archive.vbk` implementati
 - Decompress LZ4-compressed blocks
 - Support MetaVector and MetaVector2 layouts
 - Parse property dictionaries
-- Discover guest volumes embedded in VBK virtual disks (`.vhdx`)
+- Discover guest volumes embedded in VBK virtual disks (`.vhd`, `.vhdx`, `.vmdk`)
 - Parse GPT partition layout from embedded virtual disks
 - Read NTFS guest files and directories (read-only)
 
@@ -125,7 +125,7 @@ go test ./...
 
 - Current implementation focuses on reliable read/extract workflows.
 - Some advanced VBK features (for example encryption-specific handling) are not implemented yet.
-- Guest filesystem support currently targets NTFS partitions from embedded VHDX disks.
+- Guest filesystem support currently targets NTFS partitions from embedded VHD/VHDX/VMDK disks.
 
 ## Related Project
 
