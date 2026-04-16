@@ -4,7 +4,8 @@ import (
 	"io"
 	"math"
 
-	ext4fs "github.com/diskfs/go-diskfs/filesystem/ext4"
+	ext4 "github.com/Velocidex/go-ext4/parser"
+	xfsfs "github.com/masahiro331/go-xfs-filesystem/xfs"
 	ntfs "www.velocidex.com/golang/go-ntfs/parser"
 )
 
@@ -23,7 +24,8 @@ type GuestVolume struct {
 
 	fsType  string
 	ntfsCtx *ntfs.NTFSContext
-	ext4    *ext4fs.FileSystem
+	ext4Ctx *ext4.EXT4Context
+	xfsFS   *xfsfs.FileSystem
 }
 
 type GuestEntry struct {
@@ -91,16 +93,22 @@ func (v *VBK) DiscoverGuest() (*Guest, error) {
 				vol.ntfsCtx = ctx
 			} else if p.Size > 0 && p.Size <= uint64(math.MaxInt64) {
 				ext4Reader := &boundedReaderAt{r: virtualReader, offset: p.Start, size: p.Size}
-				storage := &readerAtStorage{r: ext4Reader, size: int64(p.Size)}
-				ext, extErr := ext4fs.Read(storage, int64(p.Size), 0, 512)
+				ext, extErr := ext4.GetEXT4Context(ext4Reader)
 				if extErr == nil {
-					vol.fsType = "ext4"
-					vol.ext4 = ext
+					vol.fsType = "ext"
+					vol.ext4Ctx = ext
+				} else {
+					xfsReader := io.NewSectionReader(ext4Reader, 0, int64(p.Size))
+					xfs, xfsErr := xfsfs.NewFS(*xfsReader, nil)
+					if xfsErr == nil {
+						vol.fsType = "xfs"
+						vol.xfsFS = xfs
+					}
 				}
 			}
 
 			if vol.Name == "" {
-				if vol.fsType == "ntfs" || vol.fsType == "ext4" {
+				if vol.fsType == "ntfs" || vol.fsType == "ext" || vol.fsType == "xfs" {
 					vol.Name = "Basic data partition"
 				} else {
 					vol.Name = "Partition"
@@ -119,7 +127,14 @@ func (v *VBK) DiscoverGuest() (*Guest, error) {
 			}
 			continue
 		}
-		if vol.fsType == "ext4" {
+		if vol.fsType == "ext" {
+			if vol.PathExists("/etc") || vol.PathExists("/root") || vol.PathExists("/home") {
+				g.defaultIndex = i
+				break
+			}
+			continue
+		}
+		if vol.fsType == "xfs" {
 			if vol.PathExists("/etc") || vol.PathExists("/root") || vol.PathExists("/home") {
 				g.defaultIndex = i
 				break

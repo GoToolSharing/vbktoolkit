@@ -6,30 +6,35 @@ import (
 	"testing"
 )
 
-func TestToExtPath(t *testing.T) {
+func TestExtPathComponents(t *testing.T) {
 	tests := []struct {
 		in   string
-		want string
+		want []string
 	}{
-		{in: "/", want: "."},
-		{in: "", want: "."},
-		{in: "/etc/passwd", want: "etc/passwd"},
-		{in: "etc/passwd", want: "etc/passwd"},
+		{in: "/", want: nil},
+		{in: "", want: nil},
+		{in: "/etc/passwd", want: []string{"etc", "passwd"}},
+		{in: "etc/passwd", want: []string{"etc", "passwd"}},
 	}
 
 	for _, tc := range tests {
-		got := toExtPath(tc.in)
-		if got != tc.want {
-			t.Fatalf("toExtPath(%q)=%q, want %q", tc.in, got, tc.want)
+		got := extPathComponents(tc.in)
+		if len(got) != len(tc.want) {
+			t.Fatalf("extPathComponents(%q) len=%d, want %d", tc.in, len(got), len(tc.want))
+		}
+		for i := range got {
+			if got[i] != tc.want[i] {
+				t.Fatalf("extPathComponents(%q)[%d]=%q, want %q", tc.in, i, got[i], tc.want[i])
+			}
 		}
 	}
 }
 
-func TestReaderAtStorageReadAtBounds(t *testing.T) {
-	s := &readerAtStorage{r: bytesReaderAt([]byte("abcdef")), size: 6}
+func TestReadAllFromReaderAtBounds(t *testing.T) {
+	r := bytesReaderAt([]byte("abcdef"))
 	buf := make([]byte, 4)
 
-	n, err := s.ReadAt(buf, 4)
+	n, err := r.ReadAt(buf, 4)
 	if n != 2 {
 		t.Fatalf("unexpected n=%d", n)
 	}
@@ -38,5 +43,13 @@ func TestReaderAtStorageReadAtBounds(t *testing.T) {
 	}
 	if string(buf[:n]) != "ef" {
 		t.Fatalf("unexpected data=%q", string(buf[:n]))
+	}
+
+	all, err := readAllFromReaderAt(r, 6)
+	if err != nil {
+		t.Fatalf("readAllFromReaderAt error: %v", err)
+	}
+	if string(all) != "abcdef" {
+		t.Fatalf("unexpected readAll data=%q", string(all))
 	}
 }

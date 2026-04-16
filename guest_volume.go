@@ -4,14 +4,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
-	"os"
 	"sort"
 	"strings"
-	"sync"
-	"time"
 
-	"github.com/diskfs/go-diskfs/backend"
+	ext4 "github.com/Velocidex/go-ext4/parser"
 	ntfs "www.velocidex.com/golang/go-ntfs/parser"
 )
 
@@ -22,11 +18,14 @@ func (gv *GuestVolume) PathExists(p string) bool {
 	case "ntfs":
 		_, err := gv.openMFTEntry(p)
 		return err == nil
-	case "ext4":
-		if gv.ext4 == nil {
+	case "ext":
+		_, err := gv.openExtInode(p)
+		return err == nil
+	case "xfs":
+		if gv.xfsFS == nil {
 			return false
 		}
-		_, err := gv.ext4.Stat(toExtPath(p))
+		_, err := gv.xfsFS.Stat(toXFSPath(p))
 		return err == nil
 	default:
 		return false
@@ -41,11 +40,17 @@ func (gv *GuestVolume) IsDir(p string) (bool, error) {
 			return false, err
 		}
 		return entry.Flags().IsSet("DIRECTORY"), nil
-	case "ext4":
-		if gv.ext4 == nil {
-			return false, fmt.Errorf("ext4 context is nil")
+	case "ext":
+		inode, err := gv.openExtInode(p)
+		if err != nil {
+			return false, err
 		}
-		st, err := gv.ext4.Stat(toExtPath(p))
+		return inode.Stat().Mode().IsDir(), nil
+	case "xfs":
+		if gv.xfsFS == nil {
+			return false, fmt.Errorf("xfs context is nil")
+		}
+		st, err := gv.xfsFS.Stat(toXFSPath(p))
 		if err != nil {
 			return false, err
 		}
@@ -78,11 +83,36 @@ func (gv *GuestVolume) ListDir(p string) ([]GuestEntry, error) {
 			})
 		}
 		return sortGuestEntries(out), nil
-	case "ext4":
-		if gv.ext4 == nil {
-			return nil, fmt.Errorf("ext4 context is nil")
+	case "ext":
+		inode, err := gv.openExtInode(p)
+		if err != nil {
+			return nil, err
 		}
-		dirEntries, err := gv.ext4.ReadDir(toExtPath(p))
+		entries, err := inode.Dir(gv.ext4Ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		base := normalizeGuestPath(p, "/")
+		out := make([]GuestEntry, 0, len(entries))
+		for _, fi := range entries {
+			name := fi.Name()
+			if name == "" || name == "." || name == ".." {
+				continue
+			}
+			out = append(out, GuestEntry{
+				Name:  name,
+				Path:  joinGuestPath(base, name),
+				IsDir: fi.Mode().IsDir(),
+				Size:  toUint64NonNegative(fi.Size()),
+			})
+		}
+		return sortGuestEntries(out), nil
+	case "xfs":
+		if gv.xfsFS == nil {
+			return nil, fmt.Errorf("xfs context is nil")
+		}
+		dirEntries, err := gv.xfsFS.ReadDir(toXFSPath(p))
 		if err != nil {
 			return nil, err
 		}
@@ -90,12 +120,14 @@ func (gv *GuestVolume) ListDir(p string) ([]GuestEntry, error) {
 		out := make([]GuestEntry, 0, len(dirEntries))
 		for _, de := range dirEntries {
 			name := de.Name()
-			if name == "" {
+			if name == "" || name == "." || name == ".." {
 				continue
 			}
 			sz := uint64(0)
 			if !de.IsDir() {
-				sz = toUint64NonNegative(de.Size())
+				if info, infoErr := de.Info(); infoErr == nil {
+					sz = toUint64NonNegative(info.Size())
+				}
 			}
 			out = append(out, GuestEntry{
 				Name:  name,
@@ -139,11 +171,28 @@ func (gv *GuestVolume) ReadFile(p string, limit int64) ([]byte, error) {
 			}
 		}
 		return buf[:off], nil
-	case "ext4":
-		if gv.ext4 == nil {
-			return nil, fmt.Errorf("ext4 context is nil")
+	case "ext":
+		inode, err := gv.openExtInode(p)
+		if err != nil {
+			return nil, err
 		}
-		f, err := gv.ext4.OpenFile(toExtPath(p), os.O_RDONLY)
+		reader, err := inode.GetReader(gv.ext4Ctx)
+		if err != nil {
+			return nil, err
+		}
+		size := inode.DataSize()
+		if limit >= 0 && limit < size {
+			size = limit
+		}
+		if size < 0 {
+			size = 0
+		}
+		return readAllFromReaderAt(reader, size)
+	case "xfs":
+		if gv.xfsFS == nil {
+			return nil, fmt.Errorf("xfs context is nil")
+		}
+		f, err := gv.xfsFS.Open(toXFSPath(p))
 		if err != nil {
 			return nil, err
 		}
@@ -202,16 +251,32 @@ func (gv *GuestVolume) CopyFile(p string, w io.Writer, start int64) (int64, erro
 		}
 
 		return total, nil
-	case "ext4":
-		if gv.ext4 == nil {
-			return 0, fmt.Errorf("ext4 context is nil")
+	case "ext":
+		inode, err := gv.openExtInode(p)
+		if err != nil {
+			return 0, err
 		}
-		f, err := gv.ext4.OpenFile(toExtPath(p), os.O_RDONLY)
+		reader, err := inode.GetReader(gv.ext4Ctx)
+		if err != nil {
+			return 0, err
+		}
+		size := inode.DataSize()
+		if start < 0 {
+			start = 0
+		}
+		if start > size {
+			return 0, fmt.Errorf("start offset beyond file size")
+		}
+		return copyFromReaderAt(reader, w, start, size-start)
+	case "xfs":
+		if gv.xfsFS == nil {
+			return 0, fmt.Errorf("xfs context is nil")
+		}
+		f, err := gv.xfsFS.Open(toXFSPath(p))
 		if err != nil {
 			return 0, err
 		}
 		defer f.Close()
-
 		if start < 0 {
 			start = 0
 		}
@@ -238,11 +303,17 @@ func (gv *GuestVolume) FileSize(p string) (uint64, error) {
 			return 0, err
 		}
 		return uint64(ntfs.RangeSize(rng)), nil
-	case "ext4":
-		if gv.ext4 == nil {
-			return 0, fmt.Errorf("ext4 context is nil")
+	case "ext":
+		inode, err := gv.openExtInode(p)
+		if err != nil {
+			return 0, err
 		}
-		st, err := gv.ext4.Stat(toExtPath(p))
+		return uint64(inode.DataSize()), nil
+	case "xfs":
+		if gv.xfsFS == nil {
+			return 0, fmt.Errorf("xfs context is nil")
+		}
+		st, err := gv.xfsFS.Stat(toXFSPath(p))
 		if err != nil {
 			return 0, err
 		}
@@ -269,6 +340,41 @@ func (gv *GuestVolume) openMFTEntry(p string) (*ntfs.MFT_ENTRY, error) {
 	return root.Open(gv.ntfsCtx, target)
 }
 
+func (gv *GuestVolume) openExtInode(p string) (*ext4.Inode, error) {
+	if gv.fsType != "ext" || gv.ext4Ctx == nil {
+		return nil, fmt.Errorf("unsupported filesystem type: %s", gv.fsType)
+	}
+	comps := extPathComponents(p)
+	return gv.ext4Ctx.OpenInodeWithPath(comps)
+}
+
+func extPathComponents(p string) []string {
+	norm := normalizeGuestPath(p, "/")
+	norm = strings.TrimPrefix(norm, "/")
+	if norm == "" {
+		return nil
+	}
+	parts := strings.Split(norm, "/")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" || part == "." {
+			continue
+		}
+		out = append(out, part)
+	}
+	return out
+}
+
+func toXFSPath(p string) string {
+	norm := normalizeGuestPath(p, "/")
+	norm = strings.TrimPrefix(norm, "/")
+	if norm == "" {
+		return "."
+	}
+	return norm
+}
+
 func sortGuestEntries(entries []GuestEntry) []GuestEntry {
 	sort.Slice(entries, func(i, j int) bool {
 		if entries[i].IsDir != entries[j].IsDir {
@@ -279,98 +385,60 @@ func sortGuestEntries(entries []GuestEntry) []GuestEntry {
 	return entries
 }
 
-func toExtPath(p string) string {
-	norm := normalizeGuestPath(p, "/")
-	if norm == "/" {
-		return "."
+func readAllFromReaderAt(r io.ReaderAt, size int64) ([]byte, error) {
+	buf := make([]byte, size)
+	off := int64(0)
+	for off < size {
+		n, err := r.ReadAt(buf[off:], off)
+		off += int64(n)
+		if err != nil && !errors.Is(err, io.EOF) {
+			return nil, err
+		}
+		if n == 0 {
+			break
+		}
 	}
-	return strings.TrimPrefix(norm, "/")
+	return buf[:off], nil
 }
 
-type readerAtStorage struct {
-	r    io.ReaderAt
-	size int64
-	pos  int64
-	mu   sync.Mutex
-}
-
-func (s *readerAtStorage) Read(p []byte) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	n, err := s.ReadAt(p, s.pos)
-	s.pos += int64(n)
-	return n, err
-}
-
-func (s *readerAtStorage) ReadAt(p []byte, off int64) (int, error) {
-	if off < 0 {
-		return 0, fmt.Errorf("negative offset")
+func copyFromReaderAt(r io.ReaderAt, w io.Writer, start, length int64) (int64, error) {
+	if start < 0 {
+		start = 0
 	}
-	if off >= s.size {
-		return 0, io.EOF
+	if length < 0 {
+		length = 0
 	}
-	max := int64(len(p))
-	truncated := false
-	if off+max > s.size {
-		max = s.size - off
-		truncated = true
+	buf := make([]byte, 1024*1024)
+	off := start
+	remaining := length
+	total := int64(0)
+	for remaining > 0 {
+		chunk := int64(len(buf))
+		if remaining < chunk {
+			chunk = remaining
+		}
+		n, err := r.ReadAt(buf[:chunk], off)
+		if n > 0 {
+			wn, werr := w.Write(buf[:n])
+			total += int64(wn)
+			off += int64(n)
+			remaining -= int64(n)
+			if werr != nil {
+				return total, werr
+			}
+			if wn != n {
+				return total, io.ErrShortWrite
+			}
+		}
+		if err != nil && !errors.Is(err, io.EOF) {
+			return total, err
+		}
+		if n == 0 {
+			break
+		}
 	}
-	n, err := s.r.ReadAt(p[:max], off)
-	if n < int(max) && err == nil {
-		err = io.EOF
-	} else if truncated && err == nil {
-		err = io.EOF
-	}
-	return n, err
+	return total, nil
 }
-
-func (s *readerAtStorage) Seek(offset int64, whence int) (int64, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	next := s.pos
-	switch whence {
-	case io.SeekStart:
-		next = offset
-	case io.SeekCurrent:
-		next += offset
-	case io.SeekEnd:
-		next = s.size + offset
-	default:
-		return 0, fmt.Errorf("invalid whence")
-	}
-	if next < 0 {
-		return 0, fmt.Errorf("negative seek")
-	}
-	s.pos = next
-	return s.pos, nil
-}
-
-func (s *readerAtStorage) Stat() (fs.FileInfo, error) {
-	return &readerAtStorageInfo{size: s.size}, nil
-}
-
-func (s *readerAtStorage) Close() error { return nil }
-
-func (s *readerAtStorage) Sys() (*os.File, error) {
-	return nil, fmt.Errorf("os file unavailable for reader-backed storage")
-}
-
-func (s *readerAtStorage) Writable() (backend.WritableFile, error) {
-	return nil, backend.ErrIncorrectOpenMode
-}
-
-func (s *readerAtStorage) Path() string { return "" }
-
-type readerAtStorageInfo struct {
-	size int64
-}
-
-func (i *readerAtStorageInfo) Name() string       { return "reader-at-storage" }
-func (i *readerAtStorageInfo) Size() int64        { return i.size }
-func (i *readerAtStorageInfo) Mode() fs.FileMode  { return 0 }
-func (i *readerAtStorageInfo) ModTime() time.Time { return time.Time{} }
-func (i *readerAtStorageInfo) IsDir() bool        { return false }
-func (i *readerAtStorageInfo) Sys() any           { return nil }
 
 func toUint64NonNegative(v int64) uint64 {
 	if v < 0 {
