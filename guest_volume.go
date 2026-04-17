@@ -45,7 +45,7 @@ func (gv *GuestVolume) IsDir(p string) (bool, error) {
 		if err != nil {
 			return false, err
 		}
-		return inode.Stat().Mode().IsDir(), nil
+		return extInodeIsDir(inode), nil
 	case "xfs":
 		if gv.xfsFS == nil {
 			return false, fmt.Errorf("xfs context is nil")
@@ -346,6 +346,13 @@ func (gv *GuestVolume) openExtInode(p string) (*ext4.Inode, error) {
 	}
 	comps := extPathComponents(p)
 	return gv.ext4Ctx.OpenInodeWithPath(comps)
+}
+
+func extInodeIsDir(inode *ext4.Inode) bool {
+	const extSIFMT = 0xF000
+	const extSIFDIR = 0x4000
+	mode := uint16(inode.Mode())
+	return mode&extSIFMT == extSIFDIR
 }
 
 func extPathComponents(p string) []string {
