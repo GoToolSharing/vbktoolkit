@@ -64,85 +64,91 @@ func (v *VBK) DiscoverGuest() (*Guest, error) {
 			virtualDiskSize, _ = disk.Item.Size()
 		}
 
-		parts, err := parseGPTPartitions(virtualReader, sectorSize)
+		g.addVolumesFromDisk(disk.Path, virtualReader, sectorSize, virtualDiskSize)
+	}
+
+	g.pickDefaultVolume()
+	return g, nil
+}
+
+// addVolumesFromDisk parses the partition layout of a single virtual disk
+// (already exposed as a raw io.ReaderAt over the disk's byte content) and
+// appends one GuestVolume per detected filesystem partition. It is shared by
+// DiscoverGuest (disks embedded in a VBK) and OpenDisk (standalone images).
+func (g *Guest) addVolumesFromDisk(diskPath string, virtualReader io.ReaderAt, sectorSize uint32, virtualDiskSize uint64) {
+	parts, err := parseGPTPartitions(virtualReader, sectorSize)
+	if err != nil || len(parts) == 0 {
+		parts, err = parseMBRPartitions(virtualReader, sectorSize)
 		if err != nil || len(parts) == 0 {
-			parts, err = parseMBRPartitions(virtualReader, sectorSize)
-			if err != nil || len(parts) == 0 {
-				parts = scanNTFSPartitions(virtualReader, sectorSize, virtualDiskSize)
-				if len(parts) == 0 {
-					continue
-				}
+			parts = scanNTFSPartitions(virtualReader, sectorSize, virtualDiskSize)
+			if len(parts) == 0 {
+				return
 			}
-		}
-
-		for _, p := range parts {
-			vol := &GuestVolume{
-				Index:       len(g.volumes),
-				DiskPath:    disk.Path,
-				VolumeIndex: int(p.Index),
-				Name:        p.Name,
-				Size:        p.Size,
-				fsType:      "unknown",
-			}
-
-			offsetReader := &ntfs.OffsetReader{Offset: int64(p.Start), Reader: virtualReader}
-			paged, _ := ntfs.NewPagedReader(offsetReader, 1024, 10000)
-			ctx, err := ntfs.GetNTFSContext(paged, 0)
-			if err == nil {
-				vol.fsType = "ntfs"
-				vol.ntfsCtx = ctx
-			} else if p.Size > 0 && p.Size <= uint64(math.MaxInt64) {
-				ext4Reader := &boundedReaderAt{r: virtualReader, offset: p.Start, size: p.Size}
-				ext, extErr := ext4.GetEXT4Context(ext4Reader)
-				if extErr == nil {
-					vol.fsType = "ext"
-					vol.ext4Ctx = ext
-				} else {
-					xfsReader := io.NewSectionReader(ext4Reader, 0, int64(p.Size))
-					xfs, xfsErr := xfsfs.NewFS(*xfsReader, nil)
-					if xfsErr == nil {
-						vol.fsType = "xfs"
-						vol.xfsFS = xfs
-					}
-				}
-			}
-
-			if vol.Name == "" {
-				if vol.fsType == "ntfs" || vol.fsType == "ext" || vol.fsType == "xfs" {
-					vol.Name = "Basic data partition"
-				} else {
-					vol.Name = "Partition"
-				}
-			}
-
-			g.volumes = append(g.volumes, vol)
 		}
 	}
 
+	for _, p := range parts {
+		vol := &GuestVolume{
+			Index:       len(g.volumes),
+			DiskPath:    diskPath,
+			VolumeIndex: int(p.Index),
+			Name:        p.Name,
+			Size:        p.Size,
+			fsType:      "unknown",
+		}
+
+		offsetReader := &ntfs.OffsetReader{Offset: int64(p.Start), Reader: virtualReader}
+		paged, _ := ntfs.NewPagedReader(offsetReader, 1024, 10000)
+		ctx, err := ntfs.GetNTFSContext(paged, 0)
+		if err == nil {
+			vol.fsType = "ntfs"
+			vol.ntfsCtx = ctx
+		} else if p.Size > 0 && p.Size <= uint64(math.MaxInt64) {
+			ext4Reader := &boundedReaderAt{r: virtualReader, offset: p.Start, size: p.Size}
+			ext, extErr := ext4.GetEXT4Context(ext4Reader)
+			if extErr == nil {
+				vol.fsType = "ext"
+				vol.ext4Ctx = ext
+			} else {
+				xfsReader := io.NewSectionReader(ext4Reader, 0, int64(p.Size))
+				xfs, xfsErr := xfsfs.NewFS(*xfsReader, nil)
+				if xfsErr == nil {
+					vol.fsType = "xfs"
+					vol.xfsFS = xfs
+				}
+			}
+		}
+
+		if vol.Name == "" {
+			if vol.fsType == "ntfs" || vol.fsType == "ext" || vol.fsType == "xfs" {
+				vol.Name = "Basic data partition"
+			} else {
+				vol.Name = "Partition"
+			}
+		}
+
+		g.volumes = append(g.volumes, vol)
+	}
+}
+
+// pickDefaultVolume selects the volume that most likely holds the guest OS
+// (a Windows/Linux system root) as the default active volume, leaving
+// defaultIndex at 0 when no heuristic matches.
+func (g *Guest) pickDefaultVolume() {
 	for i, vol := range g.volumes {
-		if vol.fsType == "ntfs" {
+		switch vol.fsType {
+		case "ntfs":
 			if vol.PathExists("/Windows") || vol.PathExists("/Users") {
 				g.defaultIndex = i
-				break
+				return
 			}
-			continue
-		}
-		if vol.fsType == "ext" {
+		case "ext", "xfs":
 			if vol.PathExists("/etc") || vol.PathExists("/root") || vol.PathExists("/home") {
 				g.defaultIndex = i
-				break
-			}
-			continue
-		}
-		if vol.fsType == "xfs" {
-			if vol.PathExists("/etc") || vol.PathExists("/root") || vol.PathExists("/home") {
-				g.defaultIndex = i
-				break
+				return
 			}
 		}
 	}
-
-	return g, nil
 }
 
 func (g *Guest) Close() error {
