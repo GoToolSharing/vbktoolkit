@@ -151,6 +151,74 @@ func (v *VBK) Get(p string, base *DirItem) (*DirItem, error) {
 	return item, nil
 }
 
+// DiskImage is a readable, closeable view of a virtual disk stored in the VBK.
+type DiskImage struct {
+	r       io.ReaderAt
+	size    uint64
+	pos     int64
+	closers []io.Closer
+}
+
+func (d *DiskImage) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if uint64(d.pos) >= d.size {
+		return 0, io.EOF
+	}
+	limit := int64(d.size) - d.pos
+	if int64(len(p)) > limit {
+		p = p[:limit]
+	}
+	n, err := d.r.ReadAt(p, d.pos)
+	d.pos += int64(n)
+	return n, err
+}
+
+func (d *DiskImage) Size() uint64 { return d.size }
+
+func (d *DiskImage) Close() error {
+	var first error
+	for _, c := range d.closers {
+		if err := c.Close(); err != nil && first == nil {
+			first = err
+		}
+	}
+	d.closers = nil
+	return first
+}
+
+// OpenDiskImage opens the virtual disk at diskPath (a .vmdk, .vhd, or .vhdx entry
+// inside the VBK) and returns a DiskImage that streams the full logical disk content.
+// Multi-extent VMDKs are reassembled transparently.
+func (v *VBK) OpenDiskImage(diskPath string) (*DiskImage, error) {
+	item, err := v.Get(diskPath, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	stream, err := item.Open()
+	if err != nil {
+		return nil, err
+	}
+
+	disk := guestDiskFile{Path: diskPath, Item: item}
+	locked := &lockedReadSeekerAt{r: stream}
+	virtualReader, _, virtualDiskSize, closers, err := openVirtualDiskReader(v, disk, locked)
+	if err != nil {
+		// Fall back to the raw FibStream if the disk format is not recognised.
+		size, sizeErr := item.Size()
+		if sizeErr != nil {
+			stream.Close()
+			return nil, sizeErr
+		}
+		return &DiskImage{r: locked, size: size, closers: []io.Closer{stream}}, nil
+	}
+
+	allClosers := append([]io.Closer{stream}, closers...)
+	return &DiskImage{r: virtualReader, size: virtualDiskSize, closers: allClosers}, nil
+}
+
 type SnapshotSlot struct {
 	vbk           *VBK
 	offset        int64

@@ -86,12 +86,30 @@ func main() {
 - `(*DirItem).IterDir() ([]*DirItem, error)`
 - `(*DirItem).Open() (*FibStream, error)`
 - `(*DirItem).Properties() (PropertiesDictionary, error)`
+- `(*VBK).OpenDiskImage(path string) (*DiskImage, error)`
 - `(*VBK).DiscoverGuest() (*Guest, error)`
 - `OpenDisk(diskPath string) (*Guest, error)` — discover guest volumes from a standalone virtual disk (no VBK)
 - `(*Guest).Volumes() []*GuestVolume`
 - `(*Guest).DefaultIndex() int`
 - `(*GuestVolume).ListDir(path string) ([]GuestEntry, error)`
 - `(*GuestVolume).ReadFile(path string, limit int64) ([]byte, error)`
+
+## Disk Image Example
+
+```go
+disk, err := backup.OpenDiskImage("/vm/disk0.vmdk")
+if err != nil {
+    log.Fatal(err)
+}
+defer disk.Close()
+
+fmt.Printf("disk size: %d bytes\n", disk.Size())
+
+buf := make([]byte, 512)
+if _, err := disk.Read(buf); err != nil {
+    log.Fatal(err)
+}
+```
 
 ## Guest Volume Example
 

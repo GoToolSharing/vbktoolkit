@@ -219,7 +219,7 @@ func (d *DirItem) ListDir() (map[string]*DirItem, error) {
 }
 
 func (d *DirItem) Open() (*FibStream, error) {
-	if !d.IsInternalFile() {
+	if !d.IsFile() {
 		return nil, fmt.Errorf("%w: %s", ErrIsDirectory, d.Name)
 	}
 	size, _ := d.Size()
